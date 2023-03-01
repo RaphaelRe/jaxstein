@@ -1,6 +1,7 @@
 import jax.numpy as jnp
 from jax import grad
 from jax import vmap
+from jax import tree_map
 from jax import jit
 from jax.lax import scan
 from jax.random import normal
@@ -32,23 +33,75 @@ class SteinVi:
         self.grad_log_density = grad(log_density)
         self.grad_kernel = grad(kernel)
 
+        ### TODO: check for (nested) pytree structure
+        ### TODO: depending on that call the appropriate function for particle update 
 
-    def _update_particle_i(self, xi, xl, repulse, eps):
+
+
+    def _update_particle_i_matrix(self, xi, xl, repulse, eps):
+        """
+        This function updates the position of the i-th particle xi given all particles in matrix form xl (shape=(n, p), i.e. n particles in p dimensions)
+        """
 
         kernel_i = vmap(lambda x: self.kernel(x, xi))(xl)
         grad_logdensity_i = vmap(self.grad_log_density)(xl)
         grad_kernel_i = vmap(lambda x: self.grad_kernel(x, xi))(xl)
 
         push = eps * jnp.mean(kernel_i[:, None] * grad_logdensity_i + grad_kernel_i * repulse, axis=0)
-        xi += push
         # print(f"Push: {push}, New Point: {xi}")
-        return xi
+        return xi + push
 
 
-    def update_particles(self, xl, repulse, eps):
-        def foo(xl, i, repulse=repulse):
-            return xl.at[i,:].set(self._update_particle_i(xl[i,:], xl, repulse, eps)), None  # use unjitted version here as the whole function itself is jitted
+    def _update_particle_i_pytree(self, xi, xl, repulse, eps):
+        """
+        This function updates the position of the i-th particle xi given all particles xl which are represented by a pytree (n leafs, each particle has dimension p)
+        """
+        kernel_i = tree_map(lambda x: self.kernel(x, xi), xl)
+        grad_logdensity_i = tree_map(self.grad_log_density, xl)
+        grad_kernel_i = tree_map(lambda x: self.grad_kernel(x, xi), xl)
+        push = eps * jnp.array(tree_map(calc_push, kernel_i, grad_logdensity_i, grad_kernel_i)).mean(axis=0)
+        return xi + push
+
+
+    def calc_push(self, kernel, grad_logdensity_i, grad_kernel_i, repulse, eps):
+        """
+        Method is only used for pytree structure as it is rather long in one lines.
+        For matrix valued particles, this is not outsourced.
+        Maybe I put this function directly as lambda function into the push calc 
+        """
+        # print(f"kernel: {kernel}")
+        # print(f"grad_ldens: {grad_logdensity_i}")
+        # print(f"grad_kernel:{grad_kernel_i} ")
+        # print("\n")
+        return eps * jnp.mean(kernel_i[0] * grad_logdensity_i + grad_kernel_i * repulse, axis=0)
+
+
+
+    def update_particles_matrix(self, xl, repulse, eps):
+        """
+        Function to update the positions of all particles.
+        This function only works when the particles are represented as matrix, i.e. xl.shape = (n, p) with n particles in p dimensions 
+        """
+        def foo(xl, i, repulse=repulse, eps=eps):
+            return xl.at[i,:].set(self._update_particle_i_matrix(xl[i,:], xl, repulse, eps)), None  # use unjitted version here as the whole function itself is jitted
         return scan(foo, xl, jnp.arange(xl.shape[0]))[0]
+
+
+
+    def update_particles_tree(self, xl, repulse, eps):
+        """
+        Function to update the positions of all particles.
+        This function only works when the particles are represented as pytree where each of the n leafs is a particle with dimension p 
+        """
+        # def foo(xl, i, repulse=repulse):
+            # return xl.at[i,:].set(self._update_particle_i(xl[i,:], xl, repulse, eps)), None  # use unjitted version here as the whole function itself is jitted
+        raise NotImplementedError("Next Todo")
+        
+
+        return scan(foo, xl, jnp.arange(xl.shape[0]))[0]
+
+
+
 
 
     def init(self, num_particles, p, rng_key, initializer=None, **kwargs):
