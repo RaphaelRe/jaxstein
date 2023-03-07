@@ -5,7 +5,7 @@ from jax import tree_map
 from jax import jit
 from jax.lax import scan
 from jax.random import normal
-from jax.random import PRNGKey
+from jax.flatten_util import ravel_pytree
 
 
 from tqdm import tqdm
@@ -38,7 +38,7 @@ class SteinVi:
 
 
 
-    def _update_particle_i_matrix(self, xi, xl, repulse, eps):
+    def _update_particle_i(self, xi, xl, repulse, eps):
         """
         This function updates the position of the i-th particle xi given all particles in matrix form xl (shape=(n, p), i.e. n particles in p dimensions)
         """
@@ -55,78 +55,83 @@ class SteinVi:
     def _update_particle_i_pytree(self, xi, xl, repulse, eps):
         """
         This function updates the position of the i-th particle xi given all particles xl which are represented by a pytree (n leafs, each particle has dimension p)
+        grad_logdensity is computed on the pytree. afterwards it is flatted out and then proceeds as for the normal function
         """
-        kernel_i = tree_map(lambda x: self.kernel(x, xi), xl)
-        grad_logdensity_i = tree_map(self.grad_log_density, xl)
-        grad_kernel_i = tree_map(lambda x: self.grad_kernel(x, xi), xl)
-        push = eps * jnp.array(tree_map(calc_push, kernel_i, grad_logdensity_i, grad_kernel_i)).mean(axis=0)
+        kernel_i = vmap(lambda x: self.kernel(x, xi))(xl) 
+        grad_logdensity_i, _ = ravel_pytree(self.grad_log_density(self.unravel_foo(xi)))
+        grad_kernel_i = vmap(lambda x: self.grad_kernel(x, xi))(xl)
+
+        push = eps * jnp.mean(kernel_i[:, None] * grad_logdensity_i + grad_kernel_i * repulse, axis=0)
+        xi + push
+        # print(f"Push: {push}, New Point: {xi}")
         return xi + push
 
 
-    def calc_push(self, kernel, grad_logdensity_i, grad_kernel_i, repulse, eps):
-        """
-        Method is only used for pytree structure as it is rather long in one lines.
-        For matrix valued particles, this is not outsourced.
-        Maybe I put this function directly as lambda function into the push calc 
-        """
-        # print(f"kernel: {kernel}")
-        # print(f"grad_ldens: {grad_logdensity_i}")
-        # print(f"grad_kernel:{grad_kernel_i} ")
-        # print("\n")
-        return eps * jnp.mean(kernel_i[0] * grad_logdensity_i + grad_kernel_i * repulse, axis=0)
-
-
-
-    def update_particles_matrix(self, xl, repulse, eps):
+    def _update_particles(self, xl, repulse, eps):
         """
         Function to update the positions of all particles.
         This function only works when the particles are represented as matrix, i.e. xl.shape = (n, p) with n particles in p dimensions 
         """
         def foo(xl, i, repulse=repulse, eps=eps):
-            return xl.at[i,:].set(self._update_particle_i_matrix(xl[i,:], xl, repulse, eps)), None  # use unjitted version here as the whole function itself is jitted
+            return xl.at[i,:].set(self._update_particle_i(xl[i,:], xl, repulse, eps)), None  # use unjitted version here as the whole function itself is jitted
         return scan(foo, xl, jnp.arange(xl.shape[0]))[0]
 
 
 
-    def update_particles_tree(self, xl, repulse, eps):
+    def _update_particles_pytree(self, xl, repulse, eps):
         """
         Function to update the positions of all particles.
-        This function only works when the particles are represented as pytree where each of the n leafs is a particle with dimension p 
+        Each particle is a pytree. It is assumed that all particles are collected in a list
+        :param xl: Matrix where each row represents a particle (each particle is assumed flattened pytree)
         """
-        # def foo(xl, i, repulse=repulse):
-            # return xl.at[i,:].set(self._update_particle_i(xl[i,:], xl, repulse, eps)), None  # use unjitted version here as the whole function itself is jitted
-        raise NotImplementedError("Next Todo")
+        def foo(xl, i, repulse=repulse, eps=eps):
+            return xl.at[i,:].set(self._update_particle_i_pytree(xl[i,:], xl, repulse, eps)), None  # use unjitted version here as the whole function itself is jitted
         
-
-        return scan(foo, xl, jnp.arange(xl.shape[0]))[0]
-
+        return scan(foo, xl, jnp.arange(xl.shape[0]))[0] 
 
 
+    def init_particle_positions(self, initial_particles=None, initializer=None, num_particles=None, p=None, rng_key=None, **kwargs):
+        # TODO: Make a meaningful initialization as dfault
+        # TODO: Add support for objects from numpyro and so on. probably use ravel_prytree to flatten it out (1-dim). 
+        #       Then intialize with p particles
+        if initializer is not None and initial_particles is None:
+            initial_particles = initializer(**kwargs)
+        elif p is not None and initial_particles is None:
+            print("no particles given. Trying to initialize as Gaussian...")
+            initial_particles = normal(rng_key, (num_particles, p))
 
-
-    def init(self, num_particles, p, rng_key, initializer=None, **kwargs):
-        # TODO: Make a meaningful initialization
-        if initializer is not None:
-            self.particles = initializer(**kwargs)
-        else:
-            # atm, I start at zero mean gaussian
-            self.particles = normal(rng_key, (num_particles, p))
+        self.particles = initial_particles 
 
     
     def get_particles(self):
         return self.particles
 
-    def fit(self, iterations, jit_update=True):
+
+    def fit(self, iterations, pytree=False, jit_update=True):
         if jit_update:
-            update_particles = jit(self.update_particles)
+            print("Jit compile update...")
+            update_particles = jit(self._update_particles)
+            print("Done")
         else:
-            update_particles = self.update_particles
+            print("jit_update is set to False. Consider to jit, to get more speed")
+            update_particles = self._update_particles
      
         repulse = self.repulse
         eps = self.epsilon
+
         print(f"Start fitting process...")
-        for _ in tqdm(range(iterations)):
-            self.particles = update_particles(self.particles, repulse, eps)
+
+        if pytree:
+            # self.particles is assumed to be list of pytrees
+            _, self.unravel_foo = ravel_pytree(self.particles[0])  # flat the pytree out to get the unravel function (is used in the particle updates)
+            xl_flat = jnp.stack(list(map(lambda x: ravel_pytree(x)[0], self.particles)))
+            
+            for _ in tqdm(range(iterations)):
+                particles = self._update_particles_pytree(xl_flat, repulse, eps)
+            self.particles = self.unravel_foo(particles)
+        else:
+            for _ in tqdm(range(iterations)):
+                self.particles = self._update_particles(self.particles, repulse, eps)
 
         print("Finished!")
 
