@@ -7,6 +7,7 @@ from jax.lax import scan
 from jax.random import normal
 from jax.flatten_util import ravel_pytree
 
+import matplotlib.pyplot as plt
 
 from tqdm import tqdm
 
@@ -29,9 +30,8 @@ class SteinVi:
         self.epsilon = epsilon
         self.repulse = repulse
 
-        # gradients for inference
+        # gradient of density
         self.grad_log_density = grad(log_density)
-        self.grad_kernel = grad(kernel)
 
         ### TODO: check for (nested) pytree structure
         ### TODO: depending on that call the appropriate function for particle update 
@@ -48,7 +48,10 @@ class SteinVi:
         grad_kernel_i = vmap(lambda x: self.grad_kernel(x, xi))(xl)
 
         push = eps * jnp.mean(kernel_i[:, None] * grad_logdensity_i + grad_kernel_i * repulse, axis=0)
-        # print(f"Push: {push}, New Point: {xi}")
+        # print(f"kernel: {kernel_i} \n")
+        # print(f"grad_dens: {grad_logdensity_i} \n")
+        # print(f"grad_kernel: {grad_kernel_i} \n")
+        # print(f"Push: {push}, New Point: {xi} \n")
         return xi + push
 
 
@@ -58,24 +61,32 @@ class SteinVi:
         grad_logdensity is computed on the pytree. afterwards it is flatted out and then proceeds as for the normal function
         """
         kernel_i = vmap(lambda x: self.kernel(x, xi))(xl) 
-        grad_logdensity_i, _ = ravel_pytree(self.grad_log_density(self.unravel_foo(xi)))
+        # grad_logdensity_i, _ = ravel_pytree(self.grad_log_density(self.unravel_foo(xi)))
+        grad_logdensity_i = vmap(lambda x: ravel_pytree(self.grad_log_density(self.unravel_foo(x)))[0])(xl)
         grad_kernel_i = vmap(lambda x: self.grad_kernel(x, xi))(xl)
-
         push = eps * jnp.mean(kernel_i[:, None] * grad_logdensity_i + grad_kernel_i * repulse, axis=0)
-        xi + push
-        # print(f"Push: {push}, New Point: {xi}")
+
+        # print(f"kernel: {kernel_i} \n")
+        # print(f"grad_dens: {grad_logdensity_i} \n")
+        # print(f"grad_kernel: {grad_kernel_i} \n")
+        # print(f"Push: {push}, New Point: {xi} \n")
         return xi + push
 
 
-    def _update_particles(self, xl, repulse, eps):
+
+    def _update_particles(self, xl, repulse, eps, debug=False):
         """
         Function to update the positions of all particles.
         This function only works when the particles are represented as matrix, i.e. xl.shape = (n, p) with n particles in p dimensions 
         """
-        def foo(xl, i, repulse=repulse, eps=eps):
-            return xl.at[i,:].set(self._update_particle_i(xl[i,:], xl, repulse, eps)), None  # use unjitted version here as the whole function itself is jitted
-        return scan(foo, xl, jnp.arange(xl.shape[0]))[0]
-
+        ### TODO: adaptive step size (e.g. adam, adagrad, etc?)
+        grad_log_density = vmap(self.grad_log_density)(xl)
+        k, grad_k = self.kernel(xl)
+        push = (k @ grad_log_density + repulse * grad_k) / xl.shape[0]
+        if debug:
+            print(push)
+        return xl + eps * push
+        
 
 
     def _update_particles_pytree(self, xl, repulse, eps):
@@ -86,8 +97,25 @@ class SteinVi:
         """
         def foo(xl, i, repulse=repulse, eps=eps):
             return xl.at[i,:].set(self._update_particle_i_pytree(xl[i,:], xl, repulse, eps)), None  # use unjitted version here as the whole function itself is jitted
-        
+        # for i in range(xl.shape[0]): # loop for debug as scan is nasty to debug
+            # xl = foo(xl, i)[0]
+            # print(xl)
+        # return xl
         return scan(foo, xl, jnp.arange(xl.shape[0]))[0] 
+
+
+    def _update_particles_pytree(self, xl, repulse, eps):
+        """
+        Function to update the positions of all particles.
+        Each particle is a pytree. It is assumed that all particles are collected in a list
+        :param xl: Matrix where each row represents a particle (each particle is assumed flattened pytree)
+        """
+        grad_logdensity_i = vmap(lambda x: ravel_pytree(self.grad_log_density(self.unravel_foo(x)))[0])(xl)
+        grad_log_density = vmap(self.grad_log_density)(xl)
+        k, grad_k = self.kernel(xl)
+        push = (k @ grad_log_density + repulse * grad_k) / xl.shape[0]
+        # print(push)
+        return xl + eps * push
 
 
     def init_particle_positions(self, initial_particles=None, initializer=None, num_particles=None, p=None, rng_key=None, **kwargs):
@@ -107,7 +135,7 @@ class SteinVi:
         return self.particles
 
 
-    def fit(self, iterations, pytree=False, jit_update=True):
+    def fit(self, iterations, pytree=False, jit_update=True, debug=False):
         if jit_update:
             print("Jit compile update...")
             update_particles = jit(self._update_particles)
@@ -125,16 +153,47 @@ class SteinVi:
             # self.particles is assumed to be list of pytrees
             _, self.unravel_foo = ravel_pytree(self.particles[0])  # flat the pytree out to get the unravel function (is used in the particle updates)
             xl_flat = jnp.stack(list(map(lambda x: ravel_pytree(x)[0], self.particles)))
-            
+            self.particles = xl_flat
             for _ in tqdm(range(iterations)):
-                particles = self._update_particles_pytree(xl_flat, repulse, eps)
-            self.particles = self.unravel_foo(particles)
+                self.particles = self._update_particles_pytree(self.particles, repulse, eps)
+            # self.particles = self.unravel_foo(particles)
+            self.particles = list(map(self.unravel_foo, self.particles))
         else:
             for _ in tqdm(range(iterations)):
                 self.particles = self._update_particles(self.particles, repulse, eps)
 
         print("Finished!")
 
+
+
+    def fit(self, iterations, pytree=False, jit_update=True, debug=False):
+        if jit_update:
+            print("Jit compile update...")
+            update_particles = jit(self._update_particles)
+            print("Done")
+        else:
+            print("jit_update is set to False. Consider to jit, to get more speed")
+            update_particles = self._update_particles
+     
+        repulse = self.repulse
+        eps = self.epsilon
+
+        print(f"Start fitting process...")
+
+        if pytree:
+            # self.particles is assumed to be list of pytrees
+            _, self.unravel_foo = ravel_pytree(self.particles[0])  # flat the pytree out to get the unravel function (is used in the particle updates)
+            xl_flat = jnp.stack(list(map(lambda x: ravel_pytree(x)[0], self.particles)))
+            self.particles = xl_flat
+            for _ in tqdm(range(iterations)):
+                self.particles = self._update_particles_pytree(self.particles, repulse, eps, debug)
+            # self.particles = self.unravel_foo(particles)
+            self.particles = list(map(self.unravel_foo, self.particles))
+        else:
+            for _ in tqdm(range(iterations)):
+                self.particles = self._update_particles(self.particles, repulse, eps, debug)
+
+        print("Finished!")
 
     # Viz functions?
 
