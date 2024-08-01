@@ -1,3 +1,4 @@
+from logging import debug
 import numpy as np
 import jax.numpy as jnp
 from jax.scipy.stats import multivariate_normal as mvn
@@ -33,7 +34,7 @@ kernel = rbf_kernel_auto_h
 stein = jaxstein.SteinVi(logdensity, kernel, epsilon=0.1)
 stein.init_particle_positions(num_particles=30, p=2, rng_key=PRNGKey(1))
 p_init = stein.get_particles()  # get initial particles to compare them later
-stein.fit(200)
+stein.fit(200, jit_update=True, debug=False)
 p_fit = stein.get_particles()
 
 print("Estimated mean values:")
