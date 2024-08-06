@@ -23,7 +23,7 @@ class SteinVi:
     :repulse: float representing the repulse in XXXX
     """
 
-    def __init__(self, log_density, kernel, stochastic: bool = True, epsilon: float = 1., repulse: float = 1.):
+    def __init__(self, log_density, kernel, epsilon: float = 1., repulse: float = 1., stochastic: bool = True, keep_trajectories=True):
         ### TODO: checks
         ### TODO: checks
         ### TODO: checks
@@ -36,26 +36,10 @@ class SteinVi:
         self.grad_log_density = grad(log_density)
 
         self.stochastic = stochastic
+        self.keep_trajectories = keep_trajectories
         ### TODO: check for (nested) pytree structure
         ### TODO: depending on that call the appropriate function for particle update 
 
-
-
-    def _update_particle_i(self, xi, xl, repulse, eps):
-        """
-        This function updates the position of the i-th particle xi given all particles in matrix form xl (shape=(n, p), i.e. n particles in p dimensions)
-        """
-
-        kernel_i = vmap(lambda x: self.kernel(x, xi))(xl)
-        grad_logdensity_i = vmap(self.grad_log_density)(xl)
-        grad_kernel_i = vmap(lambda x: self.grad_kernel(x, xi))(xl)
-
-        push = eps * jnp.mean(kernel_i[:, None] * grad_logdensity_i + grad_kernel_i * repulse, axis=0)
-        # print(f"kernel: {kernel_i} \n")
-        # print(f"grad_dens: {grad_logdensity_i} \n")
-        # print(f"grad_kernel: {grad_kernel_i} \n")
-        # print(f"Push: {push}, New Point: {xi} \n")
-        return xi + push
 
 
     def _update_particle_i_pytree(self, xi, xl, repulse, eps):
@@ -83,7 +67,6 @@ class SteinVi:
         This function only works when the particles are represented as matrix, i.e. xl.shape = (n, p) with n particles in p dimensions 
         """
 
-        ### TODO: adaptive step size (e.g. adam, adagrad, etc?)
         grad_log_density = vmap(self.grad_log_density)(xl)
         k, grad_k = self.kernel(xl)
         push = (k @ grad_log_density + repulse * grad_k) / xl.shape[0]
@@ -94,32 +77,6 @@ class SteinVi:
                                 lambda k, key, eps: self.calc_stochastic_diffusion(k, key) * jnp.sqrt(eps),
                                 lambda k, key, eps: jnp.zeros(xl.shape), # adding zero pertubation
                                  k, key, eps)
-
-        # if stochastic:
-        #     diffusion = self.calc_stochastic_diffusion(k, key)
-        #     velocity += diffusion * jnp.sqrt(eps)
-
-        # if debug:
-        #     print("\n === grad_log_density ===")
-        #     print(grad_log_density.shape)
-        #     print(grad_log_density)
-        #
-        #     print("\n === kernel ===")
-        #     print(k.shape)
-        #     print(k)
-        #
-        #     print("\n === grad kernel ===")
-        #     print(grad_k.shape)
-        #     print(grad_k)
-        #
-        #     if stochastic:
-        #         print("\n === diffusion ===")
-        #         print(diffusion)
-        #         print(diffusion.shape)
-        #
-        #     print("\n === full velocity ===")
-        #     print(velocity)
-        #     print(velocity.shape)
 
         return xl + stein_velocity + diffusion 
 
@@ -134,10 +91,6 @@ class SteinVi:
         noise = normal(key, self.particles.shape)
         
         return chol @ noise * jnp.sqrt(2/self.num_particles)
-
-
-
-
 
 
 
@@ -172,6 +125,7 @@ class SteinVi:
         return xl + eps * push
 
 
+
     def init_particle_positions(self, initial_particles: jax.Array = None, initializer=None, num_particles=None, p=None, rng_key=None, **kwargs):
         # TODO: Make a meaningful initialization as dfault
         # TODO: Add support for objects from numpyro and so on. probably use ravel_prytree to flatten it out (1-dim). 
@@ -189,39 +143,14 @@ class SteinVi:
         self.num_dimension = self.particles.shape[1]
 
     
+
     def get_particles(self):
         return self.particles
 
 
-    def fit(self, iterations, pytree=False, jit_update=True, debug=False):
-        if jit_update:
-            print("Jit compile update...")
-            update_particles = jit(self._update_particles)
-            print("Done")
-        else:
-            print("jit_update is set to False. Consider to jit, to get more speed")
-            update_particles = self._update_particles
-     
-        repulse = self.repulse
-        eps = self.epsilon
+    def get_trajectories(self):
+        return self.trajectories
 
-        print(f"Start fitting process...")
-
-        if pytree:
-            raise NotImplementedError("Stuff does not work atm")
-            # self.particles is assumed to be list of pytrees
-            _, self.unravel_foo = ravel_pytree(self.particles[0])  # flat the pytree out to get the unravel function (is used in the particle updates)
-            xl_flat = jnp.stack(list(map(lambda x: ravel_pytree(x)[0], self.particles)))
-            self.particles = xl_flat
-            for _ in tqdm(range(iterations)):
-                self.particles = self._update_particles_pytree(self.particles, repulse, eps)
-            # self.particles = self.unravel_foo(particles)
-            self.particles = list(map(self.unravel_foo, self.particles))
-        else:
-            for _ in tqdm(range(iterations)):
-                self.particles = update_particles(self.particles, repulse, eps)
-
-        print("Finished!")
 
 
 
@@ -250,9 +179,13 @@ class SteinVi:
             # self.particles = self.unravel_foo(particles)
             self.particles = list(map(self.unravel_foo, self.particles))
         else:
+            self.trajectories = []
+            self.trajectories.append(self.get_particles())
             keys = random.split(key, iterations)
             for i in tqdm(range(iterations)):
                 self.particles = update_particles(self.particles, repulse, eps, self.stochastic, keys[i], debug)
+                if self.keep_trajectories:
+                    self.trajectories.append(self.particles)
 
         print("Finished!")
 
