@@ -5,9 +5,25 @@ def rbf_kernel(x: jnp.ndarray, y: jnp.ndarray, gamma: float = 1.) -> float:
     return jnp.exp(-gamma * jnp.sum((x - y) ** 2))
 
 
-def rbf_kernel_auto_h(X: jnp.ndarray):
+def rbf_kernel_fix_h(X: jnp.ndarray, h: float):
     """
     calculates an RBF kernel for a given matrix with n x d where each point is given in a row. It also returns the derivative of the kernel for the given X.
+    """
+    dist_mat = vmap(lambda v: jnp.sum((v-X)**2, axis=1))(X)
+    kernel_dist = jnp.exp( -dist_mat / h**2 / 2)
+
+    # calc derivative by hand - no need for grad
+    dxkxy = -kernel_dist @ X
+    sumkxy = jnp.sum(kernel_dist, axis=1)
+    dxkxy = vmap(lambda d, x: d + x * sumkxy, in_axes=1, out_axes=1)(dxkxy, X) / (h**2)
+
+    return kernel_dist, dxkxy
+
+
+
+def rbf_kernel_auto_h(X: jnp.ndarray):
+    """
+    calculates an RBF kernel for a given matrix with n x d where each point is given in a row. It also returns the derivative of the kernel for the given X. The length-scale parameter is calculated automatically using median trick (see liu wang paper 2016)
     """
     dist_mat = vmap(lambda v: jnp.sum((v-X)**2, axis=1))(X)
     h = jnp.median(dist_mat)
