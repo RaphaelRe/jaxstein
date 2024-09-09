@@ -61,27 +61,51 @@ class SteinVi:
 
 
 
-    def _update_particles(self, xl, repulse, eps, stochastic: bool, key = None, debug=False):
+    # def _update_particles(self, xl, repulse, eps, stochastic: bool, key = None, debug=False):
+    #     """
+    #     Function to update the positions of all particles.
+    #     This function only works when the particles are represented as matrix, i.e. xl.shape = (n, p) with n particles in p dimensions 
+    #     """
+    #     grad_log_density = vmap(self.grad_log_density)(xl)
+    #     k, grad_k = self.kernel(xl)
+    #     push = (k @ grad_log_density + repulse * grad_k) / xl.shape[0]
+    #     stein_velocity =  eps * push
+    #     diffusion = jax.lax.cond(stochastic,
+    #                             lambda k, key, eps: self.calc_stochastic_diffusion(k, key) * jnp.sqrt(eps),
+    #                             lambda k, key, eps: jnp.zeros(xl.shape), # adding zero pertubation
+    #                              k, key, eps)
+    #     return xl + stein_velocity + diffusion 
+
+
+
+    def _update_particles_deterministic(self, xl, repulse, eps, key):
+        """
+        Function to update the positions of all particles.
+        This function only works when the particles are represented as matrix, i.e. xl.shape = (n, p) with n particles in p dimensions 
+
+        :param key: is currently not used and only here for future and because the key is used in the case of stockastic diffusion
+        """
+        grad_log_density = vmap(self.grad_log_density)(xl)
+        k, grad_k = self.kernel(xl)
+        push = (k @ grad_log_density + repulse * grad_k) / xl.shape[0]
+        stein_velocity =  eps * push
+
+        return xl + stein_velocity
+
+
+
+    def _update_particles_stochastic_diffusion(self, xl: jax.Array, repulse: float, eps: float, key: jax.Array) -> jax.Array:
         """
         Function to update the positions of all particles.
         This function only works when the particles are represented as matrix, i.e. xl.shape = (n, p) with n particles in p dimensions 
         """
-
         grad_log_density = vmap(self.grad_log_density)(xl)
         k, grad_k = self.kernel(xl)
-        push = (k @ grad_log_density + repulse * grad_k) / xl.shape[0]
-
-        stein_velocity =  eps * push
-
-        diffusion = jax.lax.cond(stochastic,
-                                lambda k, key, eps: self.calc_stochastic_diffusion(k, key) * jnp.sqrt(eps),
-                                lambda k, key, eps: jnp.zeros(xl.shape), # adding zero pertubation
-                                 k, key, eps)
-
-        return xl + stein_velocity + diffusion 
-
-
-
+        stein_velocity = (k @ grad_log_density + repulse * grad_k) / xl.shape[0]
+        stc_diffusion = self.calc_stochastic_diffusion(k, key)
+        
+        return xl + eps * stein_velocity + jnp.sqrt(eps) * stc_diffusion
+        
 
     def calc_stochastic_diffusion(self, kernel_dists: jax.Array, key: jax.Array) -> jax.Array:
         """
@@ -91,8 +115,6 @@ class SteinVi:
         noise = normal(key, self.particles.shape)
         
         return chol @ noise * jnp.sqrt(2/self.num_particles)
-
-
 
 
 
@@ -155,16 +177,21 @@ class SteinVi:
 
 
     def fit(self, iterations, key=random.PRNGKey(42), pytree=False, jit_update=True, debug=False):
+
+        if self.stochastic:
+            update_particles = self._update_particles_stochastic_diffusion
+        else:
+            update_particles = self._update_particles_deterministic
+
+        repulse = self.repulse
+        eps = self.epsilon
+
         if jit_update:
             print("Jit compile update...")
-            update_particles = jit(self._update_particles)  # TODO: Fix some arguments like srochastic here using partial?
+            update_particles = jit(update_particles) 
             print("Done")
         else:
             print("jit_update is set to False. Consider to jit, to get more speed")
-            update_particles = self._update_particles
-     
-        repulse = self.repulse
-        eps = self.epsilon
 
         print(f"Start fitting process...")
 
@@ -183,12 +210,8 @@ class SteinVi:
             self.trajectories.append(self.get_particles())
             keys = random.split(key, iterations)
             for i in tqdm(range(iterations)):
-                self.particles = update_particles(self.particles, repulse, eps, self.stochastic, keys[i], debug)
+                self.particles = update_particles(self.particles, repulse, eps, keys[i])
                 if self.keep_trajectories:
                     self.trajectories.append(self.particles)
 
         print("Finished!")
-
-    # Viz functions?
-
-        
