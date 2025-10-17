@@ -6,9 +6,10 @@ from jax.scipy.stats import multivariate_normal as mvn
 from sklearn.datasets import make_biclusters
 
 import sys
-sys.path.append('..')
-import jaxstein 
-from jaxstein.util import rbf_kernel
+
+sys.path.append("..")
+import jaxstein
+from jaxstein.util import rbf_kernel_auto_h
 
 import matplotlib.pyplot as plt
 
@@ -17,7 +18,6 @@ import matplotlib.pyplot as plt
 # example is stolen from the BlackJAX repr - but with SteinVI as inference method
 # original can be found here: https://github.com/blackjax-devs/sampling-book/blob/main/book/models/logistic_regression.md
 #############################
-
 
 
 num_points = 50
@@ -47,13 +47,12 @@ def logdensity_fn(w, alpha=1.0):
 
     return -prior_term + log_likelihood_term.sum()
 
+
 logdensity_fn(random.multivariate_normal(PRNGKey(1), 0.1 + jnp.zeros(M), jnp.eye(M)))
 
 
-
-
-stein = jaxstein.SteinVi(logdensity_fn, rbf_kernel, epsilon=0.001)
-stein.init(100, M, PRNGKey(1))
+stein = jaxstein.SteinVi(logdensity_fn, rbf_kernel_auto_h, epsilon=0.001)
+stein.init_particle_positions(num_particles=100, p=M, rng_key=PRNGKey(1))
 stein.fit(500)
 p = stein.get_particles()
 p.mean(axis=0)
@@ -67,10 +66,8 @@ _, nx, ny = Xspace.shape
 Phispace = jnp.concatenate([jnp.ones((1, nx, ny)), Xspace])
 Z_mcmc = sigmoid(jnp.einsum("mij,sm->sij", Phispace, p))
 Z_mcmc = Z_mcmc.mean(axis=0)
-plt.contourf(*Xspace, Z_mcmc, cmap='Blues')
+plt.contourf(*Xspace, Z_mcmc, cmap="Blues")
 plt.scatter(*X.T, c="orange")
 plt.xlabel(r"$X_0$")
 plt.ylabel(r"$X_1$")
 plt.show()
-
-
